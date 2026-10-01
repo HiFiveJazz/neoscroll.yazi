@@ -1,15 +1,19 @@
+local MIN_SPEED = 55       -- rows/sec at start/end
+local MAX_SPEED = 150      -- rows/sec while cruising
+local EASE_DISTANCE = 18   -- rows over which we ease
+local SPEED_SMOOTHING = 0.18
+
 local enqueue = ya.sync(function(state, amount)
 	local current = cx.active.current
 	local count = #current.files
 	local cursor = current.cursor
 
-	-- Nothing to scroll.
 	if count == 0 then
 		state.pending = 0
 		return false
 	end
 
-	-- Don't queue motion that is already blocked by a boundary.
+	-- Already at the top: discard impossible upward motion.
 	if amount < 0 and cursor == 0 then
 		if (state.pending or 0) < 0 then
 			state.pending = 0
@@ -17,6 +21,7 @@ local enqueue = ya.sync(function(state, amount)
 		return false
 	end
 
+	-- Already at the bottom: discard impossible downward motion.
 	if amount > 0 and cursor >= count - 1 then
 		if (state.pending or 0) > 0 then
 			state.pending = 0
@@ -39,7 +44,7 @@ local next_step = ya.sync(function(state)
 
 	if pending == 0 then
 		state.running = false
-		return 0
+		return 0, 0
 	end
 
 	local current = cx.active.current
@@ -49,29 +54,33 @@ local next_step = ya.sync(function(state)
 	if count == 0 then
 		state.pending = 0
 		state.running = false
-		return 0
+		return 0, 0
 	end
 
-	-- We've reached the top while upward motion is still queued.
-	-- Discard that impossible movement immediately.
+	-- Hit the top while upward movement is still queued.
 	if pending < 0 and cursor == 0 then
 		state.pending = 0
 		state.running = false
-		return 0
+		return 0, 0
 	end
 
-	-- Same thing at the bottom.
+	-- Hit the bottom while downward movement is still queued.
 	if pending > 0 and cursor >= count - 1 then
 		state.pending = 0
 		state.running = false
-		return 0
+		return 0, 0
 	end
 
 	local step = pending > 0 and 1 or -1
+
 	state.pending = pending - step
 
-	return step
+	return step, math.abs(state.pending)
 end)
+
+local function smoothstep(t)
+	return t * t * (3 - 2 * t)
+end
 
 return {
 	entry = function(_, job)
@@ -85,15 +94,42 @@ return {
 			return
 		end
 
+		local speed = MIN_SPEED
+		local last_step = 0
+
 		while true do
-			local step = next_step()
+			local step, remaining = next_step()
 
 			if step == 0 then
 				break
 			end
 
+			-- If direction changes, slow down before accelerating
+			-- in the opposite direction.
+			if last_step ~= 0 and step ~= last_step then
+				speed = MIN_SPEED
+			end
+
+			last_step = step
+
 			ya.emit("arrow", { step })
-			ya.sleep(1 / 60)
+
+			-- More queued movement = higher target speed.
+			--
+			-- smoothstep gives us:
+			-- slow -> fast -> slow
+			local t = math.min(remaining / EASE_DISTANCE, 1)
+			local eased = smoothstep(t)
+
+			local target_speed =
+				MIN_SPEED + (MAX_SPEED - MIN_SPEED) * eased
+
+			-- Gradually approach the target rather than instantly
+			-- changing speeds.
+			speed =
+				speed + (target_speed - speed) * SPEED_SMOOTHING
+
+			ya.sleep(1 / speed)
 		end
 	end,
 }

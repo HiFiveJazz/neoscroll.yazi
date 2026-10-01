@@ -1,7 +1,31 @@
 local enqueue = ya.sync(function(state, amount)
+	local current = cx.active.current
+	local count = #current.files
+	local cursor = current.cursor
+
+	-- Nothing to scroll.
+	if count == 0 then
+		state.pending = 0
+		return false
+	end
+
+	-- Don't queue motion that is already blocked by a boundary.
+	if amount < 0 and cursor == 0 then
+		if (state.pending or 0) < 0 then
+			state.pending = 0
+		end
+		return false
+	end
+
+	if amount > 0 and cursor >= count - 1 then
+		if (state.pending or 0) > 0 then
+			state.pending = 0
+		end
+		return false
+	end
+
 	state.pending = (state.pending or 0) + amount
 
-	-- If an animation is already running, just modify its destination.
 	if state.running then
 		return false
 	end
@@ -14,6 +38,31 @@ local next_step = ya.sync(function(state)
 	local pending = state.pending or 0
 
 	if pending == 0 then
+		state.running = false
+		return 0
+	end
+
+	local current = cx.active.current
+	local count = #current.files
+	local cursor = current.cursor
+
+	if count == 0 then
+		state.pending = 0
+		state.running = false
+		return 0
+	end
+
+	-- We've reached the top while upward motion is still queued.
+	-- Discard that impossible movement immediately.
+	if pending < 0 and cursor == 0 then
+		state.pending = 0
+		state.running = false
+		return 0
+	end
+
+	-- Same thing at the bottom.
+	if pending > 0 and cursor >= count - 1 then
+		state.pending = 0
 		state.running = false
 		return 0
 	end
@@ -32,10 +81,6 @@ return {
 			return
 		end
 
-		-- Add this motion to the current animation.
-		--
-		-- Only the first invocation becomes the worker.
-		-- Subsequent presses just change `state.pending`.
 		if not enqueue(amount) then
 			return
 		end
@@ -47,12 +92,7 @@ return {
 				break
 			end
 
-			-- ya.emit("arrow", {
-			-- 	step > 0 and "next" or "prev",
-			-- })
 			ya.emit("arrow", { step })
-
-			-- 60 cursor updates per second.
 			ya.sleep(1 / 60)
 		end
 	end,
